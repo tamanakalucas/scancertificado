@@ -1,0 +1,12 @@
+# Um endereco por linha. Linhas vazias e iniciadas por # sao ignoradas.
+# Formatos aceitos: host, host:porta, IP, IP:porta, URL.
+
+app.empresa.local
+app.empresa.local:8443
+10.10.20.30
+10.10.20.30:636
+https://portal.empresa.local/login
+
+# STARTTLS e detectado pela porta em modo Auto:
+smtp.empresa.local:25
+ldap.empresa.local:389

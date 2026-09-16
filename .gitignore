@@ -1,0 +1,9 @@
+# saidas de execucao
+*.csv
+*.json
+*.log
+!endereco.exemplo.txt
+
+# lista real de alvos: contem nomes internos de infraestrutura.
+# Remova a linha abaixo se quiser versionar a sua lista.
+endereco.txt
