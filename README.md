@@ -53,7 +53,7 @@ recuperar de fato esse inventário, use `-AlternatePorts` (ver abaixo) ou corrij
 
 # aplicações em porta não padrão (recomendado para o seu parque)
 .\Get-CertInventory.ps1 -InputFile .\endereco.txt -OutputCsv .\resultado.csv `
-    -AlternatePorts 8443,9443,8080 -PreferIPv4
+    -AlternatePorts 8443,9443,8080
 
 # investigar só o que falhou
 .\Get-CertInventory.ps1 -InputFile .\endereco.txt -PassThru |
@@ -139,7 +139,7 @@ Excel pt‑BR ler igual nos dois). Datas em ISO 8601, independentes de cultura.
 ### Status por etapa
 | Coluna | Conteúdo |
 |---|---|
-| `StatusDNS` / `DetalheDNS` | `OK` ou `FALHA`, com o erro do resolvedor |
+| `StatusDNS` / `DetalheDNS` | `OK` ou `FALHA`; o detalhe traz o erro do resolvedor e a contagem de registros por tipo (`Ax2`, `CNAMEx1`), o que separa "o resolvedor falhou" de "vieram registros sem A/AAAA" |
 | `StatusHostname` / `DetalheHostname` | `OK`, `PISTA` ou `NAO IDENTIFICADO`; o detalhe lista **cada** método e seu resultado |
 | `StatusTLS` / `DetalheTLS` | `OK`, `PARCIAL` (certificado lido sem handshake completo) ou `FALHA` |
 
@@ -169,10 +169,38 @@ Excel pt‑BR ler igual nos dois). Datas em ISO 8601, independentes de cultura.
 (`timeout TCP apos 5000 ms`, `porta fechada: nenhum servico escutando`, `sem PTR: …`,
 `alerta TLS 70 (protocol_version): … tipicamente exige TLS 1.3`).
 
-## Desempenho
+## Resumo por causa raiz
+
+Ao fim da execução o script agrupa as linhas pela etapa em que pararam. Numa lista grande é o
+que mostra o padrão — a tabela linha a linha, não:
+
+```
+Resumo por causa raiz
+--------------------------------------------------------------
+  TCP expirou: porta filtrada ou host inacessivel    33   35 %
+  TCP recusado: nada escutando na porta              28   30 %
+  DNS nao resolve o nome                             15   16 %
+  conexao derrubada durante o handshake TLS           8    9 %
+  certificado lido (OK)                               8    9 %
+
+  61 linha(s) (65%) nem chegaram ao TLS: o alvo nao atende na porta consultada.
+```
+
+## Desempenho e IPv6
 
 Runspaces compatíveis com o 5.1, `-ThrottleLimit` (padrão 16), cache por IP de hostname e de
 inferência de SO, e timeouts separados: `-TcpTimeoutMs`, `-TlsTimeoutMs`, `-HostnameTimeoutMs`.
+
+**O DNS roda no runspace principal, de propósito.** `Resolve-DnsName` é um cmdlet CDXML e
+falha de forma intermitente sob vários runspaces concorrentes — os nomes com múltiplos
+registros A são os primeiros a quebrar, porque devolvem mais objetos. O DNS é barato
+(respostas locais ou em cache) e há um cache por nome, então nomes repetidos no `endereco.txt`
+custam uma consulta só. Os runspaces ficam para o I/O de rede lento, que é onde rendem.
+
+**IPv6 é decidido pela rota real da estação.** Sem `-PreferIPv4` explícito, o script verifica se
+há endereço IPv6 global ativo; não havendo, ignora os registros AAAA e diz isso em
+`DetalheDNS`. Numa estação sem IPv6, cada AAAA vira uma linha de falha que não acrescenta nada
+ao inventário. Para forçar a tentativa, use `-PreferIPv4:$false`.
 
 ## Testes
 

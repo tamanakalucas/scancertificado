@@ -324,11 +324,39 @@ function ConvertTo-Target {
 #endregion
 
 #region ---------------------------------------------------------------- DNS
+function Test-IPv6Usable {
+    <#
+    .SYNOPSIS
+        Verifica se esta estacao tem rota IPv6 utilizavel (endereco global unicast ativo).
+    #>
+    [CmdletBinding()]
+    param()
+    try {
+        if (-not [System.Net.Sockets.Socket]::OSSupportsIPv6) {
+            return [pscustomobject]@{ Utilizavel = $false; Detalhe = 'sistema sem suporte a IPv6; enderecos AAAA serao ignorados' }
+        }
+        foreach ($nic in [System.Net.NetworkInformation.NetworkInterface]::GetAllNetworkInterfaces()) {
+            if ($nic.OperationalStatus -ne [System.Net.NetworkInformation.OperationalStatus]::Up) { continue }
+            if ($nic.NetworkInterfaceType -eq [System.Net.NetworkInformation.NetworkInterfaceType]::Loopback) { continue }
+            foreach ($ua in $nic.GetIPProperties().UnicastAddresses) {
+                $ip = $ua.Address
+                if ($ip.AddressFamily -ne [System.Net.Sockets.AddressFamily]::InterNetworkV6) { continue }
+                if ($ip.IsIPv6LinkLocal -or $ip.IsIPv6SiteLocal -or $ip.IsIPv6Teredo) { continue }
+                return [pscustomobject]@{ Utilizavel = $true; Detalhe = ('IPv6 utilizavel via ' + $nic.Name) }
+            }
+        }
+        return [pscustomobject]@{ Utilizavel = $false; Detalhe = 'estacao sem endereco IPv6 global; enderecos AAAA serao ignorados (use -PreferIPv4:$false para forcar a tentativa)' }
+    } catch {
+        # Na duvida, nao filtrar: e melhor uma linha de falha explicada do que um IP omitido
+        return [pscustomobject]@{ Utilizavel = $true; Detalhe = ('nao foi possivel avaliar o IPv6 (' + (Get-ErrorText $_) + '); AAAA sera tentado') }
+    }
+}
+
 function Resolve-TargetAddress {
     [CmdletBinding()]
     param([string]$HostName, [switch]$PreferIPv4)
 
-    $info = [ordered]@{ IPs = @(); CNAME = @(); Status = 'OK'; Detalhe = ''; IPv6Ignorados = 0 }
+    $info = [ordered]@{ IPs = @(); CNAME = @(); Status = 'OK'; Detalhe = ''; IPv6Ignorados = 0; Registros = '' }
     $parsed = $null
 
     if ([System.Net.IPAddress]::TryParse($HostName, [ref]$parsed)) {
@@ -347,9 +375,16 @@ function Resolve-TargetAddress {
 
     if (Get-Command Resolve-DnsName -ErrorAction SilentlyContinue) {
         try {
-            $recs = Resolve-DnsName -Name $HostName -ErrorAction Stop
+            $recs = @(Resolve-DnsName -Name $HostName -ErrorAction Stop)
             $info.CNAME = @($recs | Where-Object { "$($_.Type)" -eq 'CNAME' } | ForEach-Object { $_.NameHost })
             $info.IPs   = @($recs | Where-Object { "$($_.Type)" -in @('A','AAAA') } | ForEach-Object { $_.IPAddress })
+            # Registrar o que voltou separa "o resolvedor falhou" de "vieram registros que o
+            # filtro descartou" -- os dois deixariam a linha sem IP, mas pedem acoes opostas.
+            $tipos = @($recs | ForEach-Object { "$($_.Type)" } | Group-Object | ForEach-Object { '{0}x{1}' -f $_.Name, $_.Count })
+            $info.Registros = if ($tipos) { $tipos -join ' ' } else { 'nenhum registro' }
+            if ($recs.Count -gt 0 -and $info.IPs.Count -eq 0) {
+                $erros += ('Resolve-DnsName devolveu {0} registro(s) sem A/AAAA: {1}' -f $recs.Count, $info.Registros)
+            }
         } catch {
             $erros += ('Resolve-DnsName: {0}' -f (Get-ErrorText $_))
         }
@@ -380,7 +415,8 @@ function Resolve-TargetAddress {
         $det = @()
         if ($info.Detalhe) { $det += $info.Detalhe.TrimEnd('; ') }
         $det += ('{0} endereco(s) resolvido(s)' -f $info.IPs.Count)
-        if ($info.IPv6Ignorados -gt 0) { $det += ('{0} endereco(s) IPv6 ignorado(s) por -PreferIPv4' -f $info.IPv6Ignorados) }
+        if ($info.Registros) { $det += ('registros: ' + $info.Registros) }
+        if ($info.IPv6Ignorados -gt 0) { $det += ('{0} endereco(s) IPv6 ignorado(s): a estacao nao tem rota IPv6' -f $info.IPv6Ignorados) }
         $info.Detalhe = $det -join '; '
     }
 
@@ -2366,6 +2402,16 @@ function Invoke-CertInventory {
     if ($alvos.Count -eq 0) { throw 'Nenhum endereco valido informado.' }
     Write-ScanLog -Message ('{0} alvo(s) apos o parsing da entrada' -f $alvos.Count) -Path $log
 
+    # ---- IPv6 ----
+    # Sem -PreferIPv4 explicito, decidir pela rota real da estacao: sem IPv6 utilizavel, cada
+    # registro AAAA vira uma linha de falha que nao acrescenta nada ao inventario.
+    $usarPreferIPv4 = [bool]$Config.PreferIPv4
+    if (-not $Config.PreferIPv4Explicito) {
+        $ipv6 = Test-IPv6Usable
+        $usarPreferIPv4 = -not $ipv6.Utilizavel
+        Write-ScanLog -Message ('IPv6: ' + $ipv6.Detalhe) -Path $log
+    }
+
     # ---- openssl ----
     $openssl = Find-OpenSsl -OpenSslPath $Config.OpenSslPath
     if ($openssl) { Write-ScanLog -Message ('openssl encontrado em ' + $openssl) -Path $log }
@@ -2395,7 +2441,7 @@ function Invoke-CertInventory {
     $funcoes = @(
         'ConvertFrom-BigEndianUInt16','ConvertFrom-BigEndianUInt24','ConvertTo-BigEndianBytes'
         'ConvertFrom-LittleEndianUInt16','ConvertFrom-LittleEndianUInt32'
-        'Get-ErrorText','Write-ScanLog','ConvertTo-Target','Resolve-TargetAddress'
+        'Get-ErrorText','Write-ScanLog','ConvertTo-Target'
         'Get-SubjectAlternativeName','Get-CertificateFacts','Test-CertificateChain'
         'Connect-TcpWithTimeout','Invoke-StartTls','Get-StartTlsProtocol'
         'Get-TlsAlertDescription','Get-CipherSuiteName','New-TlsClientHello','Read-TlsServerResponse','Get-CertificateRaw'
@@ -2407,16 +2453,26 @@ function Invoke-CertInventory {
         'Get-TtlGuess','Get-OsGuess','Resolve-HostIdentity','Invoke-TargetScan'
     )
 
-    # ---- etapa 1: DNS em paralelo ----
-    $sbDns = {
-        param($item, $p)
-        $d = Resolve-TargetAddress -HostName $item.Host -PreferIPv4:$p.PreferIPv4
-        [pscustomobject]@{ Alvo = $item; Dns = $d }
+    # ---- etapa 1: DNS no runspace principal ----
+    # Resolve-DnsName e um cmdlet CDXML: sob varios runspaces concorrentes ele falha de forma
+    # intermitente, e os nomes com varios registros A sao os primeiros a quebrar, porque
+    # devolvem mais objetos. O DNS e barato (respostas locais ou em cache) e nao precisa de
+    # paralelismo; os runspaces ficam para o I/O de rede lento, que e onde eles rendem.
+    $cacheDns = @{}
+    $dnsResult = @()
+    $n = 0
+    foreach ($a in $alvos) {
+        $n++
+        Write-Progress -Activity 'Resolvendo DNS' -Status ("$n de $($alvos.Count): $($a.Host)") -PercentComplete (($n / $alvos.Count) * 100)
+        $chave = "$($a.Host)".ToLowerInvariant()
+        if (-not $cacheDns.ContainsKey($chave)) {
+            $cacheDns[$chave] = Resolve-TargetAddress -HostName $a.Host -PreferIPv4:$usarPreferIPv4
+        }
+        $dnsResult += [pscustomobject]@{ Alvo = $a; Dns = $cacheDns[$chave] }
     }
-    $dnsResult = Invoke-InParallel -InputObject $alvos -ScriptBlock $sbDns `
-        -FunctionNames @('Resolve-TargetAddress','Get-ErrorText') `
-        -Parameters @{ PreferIPv4 = [bool]$Config.PreferIPv4 } `
-        -ThrottleLimit $Config.ThrottleLimit -Activity 'Resolvendo DNS'
+    Write-Progress -Activity 'Resolvendo DNS' -Completed
+    $falhasDns = @($dnsResult | Where-Object { $_.Dns.Status -ne 'OK' }).Count
+    Write-ScanLog -Message ('DNS: {0} nome(s) unico(s), {1} sem resolucao' -f $cacheDns.Count, $falhasDns) -Path $log
 
     # ---- monta a lista de trabalho e conta entradas por IP ----
     $trabalho = @()
@@ -2466,6 +2522,63 @@ function Invoke-CertInventory {
     return $resultados
 }
 
+function Show-CauseSummary {
+    <#
+    .SYNOPSIS
+        Agrupa as linhas por causa raiz e sugere a acao correspondente.
+    .DESCRIPTION
+        Numa lista grande a tabela linha a linha nao mostra o padrao. O que decide o proximo
+        passo e saber quantos alvos pararam em cada etapa: DNS, TCP ou TLS.
+    #>
+    [CmdletBinding()]
+    param([object[]]$Resultados)
+
+    $baldes = [ordered]@{}
+    function Somar([string]$Rotulo) {
+        if (-not $baldes.Contains($Rotulo)) { $baldes[$Rotulo] = 0 }
+        $baldes[$Rotulo] = $baldes[$Rotulo] + 1
+    }
+
+    foreach ($r in $Resultados) {
+        if ($r.Situacao -in @('OK','EXPIRA EM BREVE','EXPIRADO')) {
+            Somar ('certificado lido ({0})' -f $r.Situacao)
+            continue
+        }
+        if ($r.StatusDNS -ne 'OK') { Somar 'DNS nao resolve o nome'; continue }
+        $d = "$($r.DetalheTLS)"
+        switch -Regex ($d) {
+            'porta fechada|refused|recusou'      { Somar 'TCP recusado: nada escutando na porta'; break }
+            'timeout TCP'                        { Somar 'TCP expirou: porta filtrada ou host inacessivel'; break }
+            'sem rota|unreachable'               { Somar 'sem rota ate o destino'; break }
+            'forcibly closed|forcada|reset'      { Somar 'conexao derrubada durante o handshake TLS'; break }
+            'alerta TLS 70'                      { Somar 'servidor so aceita TLS 1.3'; break }
+            'alerta TLS 40'                      { Somar 'sem cipher suite em comum'; break }
+            'certificado de cliente|CertificateRequest|alerta TLS 116' { Somar 'servidor exige certificado de cliente'; break }
+            'alerta TLS 112|unrecognized_name'   { Somar 'servidor nao reconhece o SNI enviado'; break }
+            default                              { Somar 'outra falha de TLS (ver DetalheTLS)' }
+        }
+    }
+
+    $total = $Resultados.Count
+    Write-Host ''
+    Write-Host 'Resumo por causa raiz' -ForegroundColor Cyan
+    Write-Host ('-' * 62)
+    foreach ($k in ($baldes.Keys | Sort-Object { -$baldes[$_] })) {
+        Write-Host ('  {0,-46} {1,4}  {2,5:P0}' -f $k, $baldes[$k], ($baldes[$k] / $total))
+    }
+
+    $semTcp = 0
+    foreach ($k in $baldes.Keys) { if ($k -match '^TCP ') { $semTcp += $baldes[$k] } }
+    if ($semTcp -gt 0) {
+        $pct = [int](($semTcp / $total) * 100)
+        Write-Host ''
+        Write-Host ("  {0} linha(s) ({1}%) nem chegaram ao TLS: o alvo nao atende na porta consultada." -f $semTcp, $pct) -ForegroundColor Yellow
+        Write-Host '  Isso nao se resolve com leitura de certificado. Confirme a porta de cada'  -ForegroundColor Yellow
+        Write-Host '  aplicacao no endereco.txt, ou use -AlternatePorts 8443,9443,8080.'          -ForegroundColor Yellow
+    }
+    Write-Host ''
+}
+
 function Show-ResultSummary {
     <#
     .SYNOPSIS
@@ -2488,8 +2601,8 @@ function Show-ResultSummary {
         [pscustomobject]@{
             Entrada       = Limitar $_.Entrada 34
             IP            = Limitar $_.IP 39
-            Hostname      = Limitar $_.Hostname 28
-            SOProvavel    = Limitar $_.SOProvavel 14
+            Hostname      = Limitar $_.Hostname 30
+            SOProvavel    = Limitar $_.SOProvavel 16
             ValidoAte     = if ($_.ValidoAte -match '^\d{4}-') { $_.ValidoAte } else { '-' }
             DiasRestantes = if ("$($_.DiasRestantes)" -match '^-?\d+$') { $_.DiasRestantes } else { '-' }
             Situacao      = Limitar $_.Situacao 18
@@ -2508,6 +2621,7 @@ if ($MyInvocation.InvocationName -ne '.') {
         UseSmtpBanner = $UseSmtpBanner; UseLdap = $UseLdap; UseSshBanner = $UseSshBanner
         SnmpCommunity = $SnmpCommunity; SshUser = $SshUser; SshKeyPath = $SshKeyPath
         OpenSslPath = $OpenSslPath; ThrottleLimit = $ThrottleLimit
+        PreferIPv4Explicito = $PSBoundParameters.ContainsKey('PreferIPv4')
         TcpTimeoutMs = $TcpTimeoutMs; TlsTimeoutMs = $TlsTimeoutMs
         HostnameTimeoutMs = $HostnameTimeoutMs; WarningDays = $WarningDays
         LogFile = $LogFile; CompareSni = $CompareSni
@@ -2525,6 +2639,12 @@ if ($MyInvocation.InvocationName -ne '.') {
         Write-Host ("JSON salvo em: {0}" -f $OutputJson) -ForegroundColor Green
     }
 
-    if ($PassThru) { $resultados } else { Show-ResultSummary -Resultados $resultados }
+    if ($PassThru) {
+        Show-CauseSummary -Resultados $resultados
+        $resultados
+    } else {
+        Show-ResultSummary -Resultados $resultados
+        Show-CauseSummary  -Resultados $resultados
+    }
 }
 #endregion
