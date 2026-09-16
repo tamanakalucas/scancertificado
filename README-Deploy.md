@@ -148,6 +148,25 @@ por processo próprio, quando tiver confiança.
 
 `Get-Help .\Deploy-IISCertificate.ps1 -Full` traz todos.
 
+## Por que cada binding foi ignorado
+
+O relatório lista os motivos agrupados, não só a contagem:
+
+```
+Resumo
+----------------------------------------------------
+  TROCARIA (ensaio)                        3
+  ignorado                                 2
+
+Por que cada binding foi ignorado
+----------------------------------------------------
+    1x  ja usa o certificado novo
+    1x  o certificado novo nao cobre intranet.energisa.corp (nomes: *.energisa.com.br, energisa.com.br)
+```
+
+Sem isso, um binding ignorado por engano passa despercebido — foi exatamente assim que um bug
+de montagem do bloco remoto sobreviveu a um ensaio inteiro.
+
 ## Quando o servidor não responde
 
 O script separa **"não consegui chegar lá"** de **"cheguei e não achei bindings"**, e traduz o

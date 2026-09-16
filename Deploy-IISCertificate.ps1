@@ -503,10 +503,9 @@ $script:FuncoesRemotas = @(
     'Get-CertificateSubjectNames'
 )
 
+# O param NAO fica aqui: ele precisa ser a primeira instrucao do scriptblock, e
+# New-RemoteScriptBlock o emite antes das definicoes de funcao.
 $script:CorpoRemoto = @'
-# A senha vai como parametro proprio, e nao dentro de $Ctx: SecureString tem tratamento
-# dedicado no serializador do PSRemoting, e aninhar em hashtable nao e garantido.
-param($Ctx, $Senha)
 
 $resultado = [ordered]@{
     Servidor      = $env:COMPUTERNAME
@@ -747,7 +746,25 @@ function New-RemoteScriptBlock {
         $cmd = Get-Command -Name $n -CommandType Function -ErrorAction Stop
         "function $n {`r`n" + $cmd.Definition + "`r`n}"
     }
-    return [scriptblock]::Create((($defs -join "`r`n`r`n") + "`r`n`r`n" + $script:CorpoRemoto))
+
+    # param() TEM de ser a primeira instrucao do scriptblock. Vindo depois de qualquer outra
+    # coisa -- uma definicao de funcao, por exemplo -- o PowerShell o interpreta como chamada
+    # de um comando chamado 'param', os argumentos nunca sao vinculados e o bloco remoto roda
+    # inteiro com as variaveis nulas. A senha vai como parametro proprio, e nao dentro de
+    # $Ctx, porque SecureString tem tratamento dedicado no serializador do PSRemoting.
+    $texto = @(
+        'param($Ctx, $Senha)'
+        ''
+        ($defs -join "`r`n`r`n")
+        ''
+        $script:CorpoRemoto
+    ) -join "`r`n"
+
+    $sb = [scriptblock]::Create($texto)
+    if ($null -eq $sb.Ast.ParamBlock) {
+        throw 'Falha ao montar o bloco remoto: o param() nao ficou como primeira instrucao.'
+    }
+    return $sb
 }
 #endregion
 
@@ -847,6 +864,17 @@ function Show-DeployReport {
     Write-Host 'Resumo' -ForegroundColor Cyan
     Write-Host ('-' * 52)
     foreach ($g in $grupos) { Write-Host ('  {0,-34} {1,4}' -f $g.Name, $g.Count) }
+
+    # Sem o motivo a vista, um binding ignorado por engano passa despercebido.
+    $ignorados = @($Linhas | Where-Object { "$($_.Acao)" -eq 'ignorado' -and $_.Motivo })
+    if ($ignorados.Count -gt 0) {
+        Write-Host ''
+        Write-Host 'Por que cada binding foi ignorado' -ForegroundColor Cyan
+        Write-Host ('-' * 52)
+        foreach ($g in ($ignorados | Group-Object Motivo | Sort-Object Count -Descending)) {
+            Write-Host ('  {0,3}x  {1}' -f $g.Count, $g.Name)
+        }
+    }
 
     $avisos = @($Linhas | Where-Object { $_.Aviso } )
     if ($avisos.Count -gt 0) {

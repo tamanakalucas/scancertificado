@@ -341,8 +341,22 @@ Describe 'New-RemoteScriptBlock' {
             $txt | Should -Match ("function\s+" + [regex]::Escape($f))
         }
     }
-    It 'declara os dois parametros que a chamada remota envia' {
-        (New-RemoteScriptBlock).ToString() | Should -Match 'param\(\$Ctx, \$Senha\)'
+    It 'tem um bloco de parametros REAL, reconhecido pelo parser' {
+        # Procurar o texto 'param(...)' nao basta: se ele vier depois de qualquer outra
+        # instrucao, o PowerShell o trata como chamada de um comando chamado 'param', nao
+        # vincula argumento nenhum e o bloco remoto roda inteiro com as variaveis nulas --
+        # relatando "ignorado" para bindings que deveriam ser trocados. O parser e quem diz.
+        $ast = (New-RemoteScriptBlock).Ast
+        $ast.ParamBlock | Should -Not -BeNullOrEmpty
+        $ast.ParamBlock.Parameters.Count | Should -Be 2
+        @($ast.ParamBlock.Parameters | ForEach-Object { $_.Name.VariablePath.UserPath }) | Should -Be @('Ctx','Senha')
+    }
+    It 'coloca o param antes de qualquer definicao de funcao' {
+        $txt = (New-RemoteScriptBlock).ToString()
+        $posParam = $txt.IndexOf('param(')
+        $posFunc  = $txt.IndexOf('function ')
+        $posParam | Should -BeGreaterThan -1
+        $posParam | Should -BeLessThan $posFunc
     }
 }
 
