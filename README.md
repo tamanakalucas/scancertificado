@@ -1,3 +1,13 @@
+# scancertificado
+
+Duas ferramentas complementares para o ciclo de vida de certificados TLS:
+
+- **`Get-CertInventory.ps1`** — descobre o que existe e o que está vencendo (este README).
+- **`Deploy-IISCertificate.ps1`** — instala o PFX e refaz os bindings do IIS preservando as
+  configurações existentes. Veja [README-Deploy.md](README-Deploy.md).
+
+---
+
 # Get-CertInventory
 
 Inventário de certificados TLS para parque misto Windows/Linux, em Windows PowerShell 5.1 e

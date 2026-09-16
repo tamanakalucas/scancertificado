@@ -1,0 +1,6 @@
+# Um servidor por linha. Linhas vazias e iniciadas por # sao ignoradas.
+# Use o nome que o WinRM resolve (FQDN de preferencia).
+
+MGINFRAWEBP2.energisa.corp
+WEB01.energisa.corp
+WEB02.energisa.corp
