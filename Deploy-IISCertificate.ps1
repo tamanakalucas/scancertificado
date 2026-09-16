@@ -820,7 +820,7 @@ function Show-DeployReport {
     param([object[]]$Linhas, [bool]$Ensaio)
 
     if (-not $Linhas -or $Linhas.Count -eq 0) {
-        Write-Host 'Nenhum binding https encontrado nos servidores consultados.' -ForegroundColor Yellow
+        Write-Host 'Nenhum binding https nos servidores que RESPONDERAM (veja acima quais nao responderam).' -ForegroundColor Yellow
         return
     }
 
@@ -880,6 +880,77 @@ function Show-DeployReport {
 #endregion
 
 #region ---------------------------------------------------------------- Execucao
+function Get-RemotingErrorHint {
+    <#
+    .SYNOPSIS
+        Traduz o erro do PSRemoting para a causa provavel e o que conferir.
+    .DESCRIPTION
+        As mensagens do WinRM sao genericas: "Access is denied" cobre desde conta sem direito
+        ate politica de UAC para conta local. Sem a traducao, o operador fica sem proximo passo.
+    #>
+    [CmdletBinding()]
+    param([string]$Message)
+
+    $m = "$Message"
+    if (-not $m) { return 'erro sem mensagem' }
+
+    # 'Acesso negado' e a traducao pt-BR de 'Access is denied'
+    if ($m -match 'Access is denied|Acesso negado|5 - Acesso') {
+        return @(
+            'a conta usada nao tem direito de administracao remota NESTE servidor.'
+            'Confira: (1) a conta e Administrador local ou membro de "Remote Management Users" no destino;'
+            '(2) para conta LOCAL do destino, o UAC remoto bloqueia por padrao -- veja LocalAccountTokenFilterPolicy;'
+            '(3) tente com -Credential de uma conta administrativa do dominio.'
+        ) -join ' '
+    }
+    if ($m -match 'cannot be resolved|nao pode ser resolvido|No such host|not be resolved') {
+        return 'o nome nao resolve em DNS a partir desta estacao. Confira o FQDN ou use o IP.'
+    }
+    if ($m -match 'TrustedHosts') {
+        return 'autenticacao caiu para NTLM e o destino nao esta em TrustedHosts. Use o FQDN para que o Kerberos seja usado, ou inclua o host em TrustedHosts.'
+    }
+    if ($m -match 'Kerberos|authentication mechanism|mecanismo de autenticacao') {
+        return 'falha de autenticacao Kerberos. Use o FQDN do servidor e informe -Credential.'
+    }
+    if ($m -match 'WinRM cannot complete|cannot connect to the destination|nao pode se conectar|actively refused|firewall') {
+        return 'o WinRM nao respondeu: servico parado, nao configurado (Enable-PSRemoting) ou porta 5985/5986 bloqueada por firewall.'
+    }
+    if ($m -match 'timed out|tempo limite|timeout') {
+        return 'tempo esgotado ao conectar. Host inacessivel ou porta do WinRM filtrada.'
+    }
+    if ($m -match 'certificate|certificado') {
+        return 'problema no certificado do WinRM sobre HTTPS. Confira o certificado do listener no destino.'
+    }
+    return 'causa nao reconhecida; veja a mensagem original.'
+}
+
+function Test-RemotingReachability {
+    <#
+    .SYNOPSIS
+        Diz se as portas do WinRM atendem, para separar problema de rede de problema de conta.
+    #>
+    [CmdletBinding()]
+    param([string]$Computer, [int]$TimeoutMs = 3000)
+
+    $portas = @{ 5985 = 'HTTP'; 5986 = 'HTTPS' }
+    $abertas = @()
+    foreach ($porta in ($portas.Keys | Sort-Object)) {
+        $cli = New-Object System.Net.Sockets.TcpClient
+        try {
+            $iar = $cli.BeginConnect($Computer, $porta, $null, $null)
+            if ($iar.AsyncWaitHandle.WaitOne($TimeoutMs)) {
+                $cli.EndConnect($iar)
+                $abertas += ('{0}/{1}' -f $porta, $portas[$porta])
+            }
+        } catch {
+        } finally { try { $cli.Close() } catch { } }
+    }
+    if ($abertas.Count -gt 0) {
+        return ('WinRM atende em {0}: a rede esta ok, o problema e de autenticacao ou autorizacao' -f ($abertas -join ' e '))
+    }
+    return 'nenhuma porta do WinRM (5985/5986) atendeu: servico parado, PSRemoting nao habilitado ou firewall'
+}
+
 function Get-ServerList {
     [CmdletBinding()]
     param([string[]]$ComputerName, [string]$ComputerListFile)
@@ -913,12 +984,44 @@ function Invoke-OnServers {
     if ($UseSsl)     { $p['UseSSL'] = $true }
 
     $saida = Invoke-Command @p
+
+    $falhas = @()
     foreach ($e in $erroRemoto) {
         $alvo = if ($e.TargetObject) { "$($e.TargetObject)" } else { '(servidor nao identificado)' }
-        Write-DeployLog -Message ("Falha ao conectar em {0}: {1}" -f $alvo, ($e.Exception.Message -replace '\s+',' ')) -Level 'ERRO' -Path $LogFile
-        Write-Warning ("{0}: {1}" -f $alvo, ($e.Exception.Message -replace '\s+',' '))
+        $msg  = ($e.Exception.Message -replace '\s+',' ').Trim()
+        $dica = Get-RemotingErrorHint -Message $msg
+        $rede = if ($alvo -ne '(servidor nao identificado)') { Test-RemotingReachability -Computer $alvo } else { '' }
+        $falhas += [pscustomobject]@{ Servidor = $alvo; Mensagem = $msg; Dica = $dica; Rede = $rede }
+        Write-DeployLog -Message ("Falha em {0}: {1} | {2} | {3}" -f $alvo, $msg, $dica, $rede) -Level 'ERRO' -Path $LogFile
     }
-    return ,@($saida)
+
+    return [pscustomobject]@{
+        Respostas  = @($saida)
+        Falhas     = $falhas
+        Solicitados = @($Servers)
+    }
+}
+
+function Show-ServerStatus {
+    <#
+    .SYNOPSIS
+        Mostra quais servidores responderam e, para os que nao responderam, o que conferir.
+    #>
+    [CmdletBinding()]
+    param([pscustomobject]$Resultado)
+
+    $ok = @($Resultado.Respostas).Count
+    $total = @($Resultado.Solicitados).Count
+    Write-Host ''
+    Write-Host ('Servidores: {0} de {1} responderam' -f $ok, $total) -ForegroundColor $(if ($ok -eq $total) { 'Green' } elseif ($ok -eq 0) { 'Red' } else { 'Yellow' })
+
+    foreach ($f in $Resultado.Falhas) {
+        Write-Host ''
+        Write-Host ('  {0}: NAO RESPONDEU' -f $f.Servidor) -ForegroundColor Red
+        Write-Host ('    erro  : {0}' -f $f.Mensagem)
+        Write-Host ('    causa : {0}' -f $f.Dica) -ForegroundColor Yellow
+        if ($f.Rede) { Write-Host ('    rede  : {0}' -f $f.Rede) }
+    }
 }
 
 function Invoke-CertDeploy {
@@ -998,12 +1101,21 @@ function Invoke-CertDeploy {
 
     # ---- passe 1: ensaio, que tambem e o backup ----
     Write-Host ('Consultando {0} servidor(es)...' -f $servidores.Count)
-    $ensaio = Invoke-OnServers -Servers $servidores -ScriptBlock $sb -ArgumentList @($ctx, $senha) `
+    $res1 = Invoke-OnServers -Servers $servidores -ScriptBlock $sb -ArgumentList @($ctx, $senha) `
                 -Credential $Cfg.Credential -UseSsl ([bool]$Cfg.UseSsl) -ThrottleLimit $Cfg.ThrottleLimit -LogFile $log
+    $ensaio = $res1.Respostas
+    Show-ServerStatus -Resultado $res1
 
     foreach ($r in $ensaio) {
         if ($r.Status -ne 'OK') { Write-Warning ('{0}: {1} -- {2}' -f $r.Servidor, $r.Status, $r.Erro) }
         foreach ($a in $r.Avisos) { Write-Warning ('{0}: {1}' -f $r.Servidor, $a) }
+    }
+
+    if (@($ensaio).Count -eq 0) {
+        Write-Host ''
+        Write-Host 'Nenhum servidor respondeu; nada foi consultado nem alterado.' -ForegroundColor Red
+        Write-Host 'Resolva o acesso remoto acima e repita o comando.' -ForegroundColor Red
+        return @()
     }
 
     $linhasEnsaio = @($ensaio | ForEach-Object { $_.Bindings })
@@ -1042,8 +1154,10 @@ function Invoke-CertDeploy {
     $ctx.Apply = $true
     $servidoresComTroca = @($porServidor.Name)
     Write-Host ('Aplicando em {0} servidor(es)...' -f $servidoresComTroca.Count)
-    $final = Invoke-OnServers -Servers $servidoresComTroca -ScriptBlock $sb -ArgumentList @($ctx, $senha) `
+    $res2 = Invoke-OnServers -Servers $servidoresComTroca -ScriptBlock $sb -ArgumentList @($ctx, $senha) `
                 -Credential $Cfg.Credential -UseSsl ([bool]$Cfg.UseSsl) -ThrottleLimit $Cfg.ThrottleLimit -LogFile $log
+    $final = $res2.Respostas
+    Show-ServerStatus -Resultado $res2
 
     foreach ($r in $final) {
         if ($r.Status -ne 'OK') { Write-Warning ('{0}: {1} -- {2}' -f $r.Servidor, $r.Status, $r.Erro) }

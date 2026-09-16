@@ -148,6 +148,31 @@ por processo próprio, quando tiver confiança.
 
 `Get-Help .\Deploy-IISCertificate.ps1 -Full` traz todos.
 
+## Quando o servidor não responde
+
+O script separa **"não consegui chegar lá"** de **"cheguei e não achei bindings"**, e traduz o
+erro do WinRM para a causa provável:
+
+```
+Servidores: 0 de 1 responderam
+
+  ACSISGMAPLH1.energisa.corp: NAO RESPONDEU
+    erro  : Connecting to remote server ... failed ... Access is denied.
+    causa : a conta usada nao tem direito de administracao remota NESTE servidor.
+            Confira: (1) a conta e Administrador local ou membro de "Remote Management
+            Users" no destino; (2) para conta LOCAL do destino, o UAC remoto bloqueia por
+            padrao -- veja LocalAccountTokenFilterPolicy; (3) tente com -Credential de uma
+            conta administrativa do dominio.
+    rede  : WinRM atende em 5985/HTTP: a rede esta ok, o problema e de autenticacao ou
+            autorizacao
+```
+
+A linha `rede` testa as portas 5985/5986 e é o que separa problema de firewall de problema de
+conta. Se a porta atende e o erro é `Access is denied`, **não é rede** — é autorização.
+
+Erros reconhecidos: acesso negado (en e pt-BR), DNS, TrustedHosts, Kerberos, WinRM
+indisponível, tempo esgotado e certificado do listener HTTPS.
+
 ## Requisitos
 
 PSRemoting habilitado nos destinos, conta administrativa, IIS 7.5+. Usa

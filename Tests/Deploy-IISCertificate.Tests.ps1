@@ -345,3 +345,45 @@ Describe 'New-RemoteScriptBlock' {
         (New-RemoteScriptBlock).ToString() | Should -Match 'param\(\$Ctx, \$Senha\)'
     }
 }
+
+Describe 'Get-RemotingErrorHint: traducao do erro do WinRM' {
+    It 'reconhece "Access is denied" como problema de autorizacao, nao de rede' {
+        $h = Get-RemotingErrorHint -Message 'Connecting to remote server SRV01 failed with the following error message : Access is denied.'
+        $h | Should -Match 'direito de administracao remota'
+        $h | Should -Match 'Remote Management Users'
+    }
+    It 'reconhece a mesma falha em portugues' {
+        Get-RemotingErrorHint -Message 'Acesso negado.' | Should -Match 'direito de administracao remota'
+    }
+    It 'lembra do UAC remoto para conta local' {
+        Get-RemotingErrorHint -Message 'Access is denied.' | Should -Match 'LocalAccountTokenFilterPolicy'
+    }
+    It 'separa falha de DNS' {
+        Get-RemotingErrorHint -Message 'The name cannot be resolved' | Should -Match 'DNS'
+    }
+    It 'separa TrustedHosts de Kerberos' {
+        Get-RemotingErrorHint -Message 'the destination machine must be added to the TrustedHosts configuration setting' | Should -Match 'TrustedHosts'
+    }
+    It 'separa WinRM indisponivel de problema de conta' {
+        $h = Get-RemotingErrorHint -Message 'WinRM cannot complete the operation. Verify that the specified computer name is valid'
+        $h | Should -Match 'WinRM nao respondeu'
+        $h | Should -Match '5985'
+    }
+    It 'reconhece tempo esgotado' {
+        Get-RemotingErrorHint -Message 'The operation has timed out.' | Should -Match 'Tempo esgotado|tempo esgotado'
+    }
+    It 'nunca devolve vazio' {
+        Get-RemotingErrorHint -Message ''    | Should -Not -BeNullOrEmpty
+        Get-RemotingErrorHint -Message $null | Should -Not -BeNullOrEmpty
+        Get-RemotingErrorHint -Message 'mensagem completamente nova' | Should -Not -BeNullOrEmpty
+    }
+}
+
+Describe 'Test-RemotingReachability' {
+    It 'relata que nenhuma porta do WinRM atendeu quando o host nao escuta' {
+        Test-RemotingReachability -Computer '127.0.0.1' -TimeoutMs 500 | Should -Match 'nenhuma porta'
+    }
+    It 'nao lanca excecao com host inexistente' {
+        { Test-RemotingReachability -Computer 'host.que.nao.existe.invalido' -TimeoutMs 500 } | Should -Not -Throw
+    }
+}
