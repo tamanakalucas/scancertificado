@@ -3,8 +3,11 @@
 Duas ferramentas complementares para o ciclo de vida de certificados TLS:
 
 - **`Get-CertInventory.ps1`** — descobre o que existe e o que está vencendo (este README).
-- **`Deploy-IISCertificate.ps1`** — instala o PFX e refaz os bindings do IIS preservando as
-  configurações existentes. Veja [README-Deploy.md](README-Deploy.md).
+- **`Deploy-IISCertificate.ps1`** — instala um PFX (CA pública) e refaz os bindings do IIS
+  preservando as configurações existentes. Veja [README-Deploy.md](README-Deploy.md).
+- **`Request-IISCertificate.ps1`** — renova certificados da CA interna (AD CS) direto no
+  servidor, reaproveitando CN e SANs, e refaz os bindings. Veja
+  [README-Request.md](README-Request.md).
 
 ---
 
