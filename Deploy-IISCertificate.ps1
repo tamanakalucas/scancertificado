@@ -7,8 +7,12 @@
     Executa de uma estacao central sobre uma lista de servidores, via PSRemoting. Para cada
     servidor:
 
-        1. Importa o PFX em LocalMachine\My. O arquivo NAO e gravado em disco no servidor: os
-           bytes vao pela sessao e o certificado e montado em memoria.
+        1. Importa o PFX em LocalMachine\My ("Pessoal" no certlm.msc) ou na loja indicada por
+           -CertificateStoreName. O arquivo NAO e gravado em disco no servidor: os bytes vao
+           pela sessao e o certificado e montado em memoria. As intermediarias do PFX vao para
+           LocalMachine\CA, sem o que o servidor serviria cadeia incompleta.
+
+           O import so ocorre com -Apply. Em ensaio nada e gravado no servidor.
         2. Localiza os bindings HTTPS candidatos.
         3. Refaz cada binding trocando apenas CertificateHash e CertificateStoreName.
         4. Confere no HTTP.SYS se a troca realmente valeu, e corrige com netsh se nao valeu.
@@ -88,6 +92,14 @@
 
 .PARAMETER Apply
     Efetiva as mudancas. Sem este parametro o script apenas relata o que faria.
+
+.PARAMETER CertificateStoreName
+    Loja de destino da folha, em LocalMachine. Padrao 'My', que no certlm.msc aparece como
+    "Pessoal". Use 'WebHosting' ("Hospedagem na Web") se essa for a convencao do seu parque:
+    e a loja desenhada para servidores com muitos certificados de site.
+
+    As intermediarias do PFX vao sempre para 'CA' ("Autoridades de Certificacao
+    Intermediarias"), independentemente desta escolha.
 
 .PARAMETER Exportable
     Importa a chave privada como exportavel. Desligado por padrao: um curinga replicado em
@@ -185,6 +197,10 @@ param(
 
     [Parameter(ParameterSetName = 'Deploy')]
     [switch]$Exportable,
+
+    [Parameter(ParameterSetName = 'Deploy')]
+    [ValidateSet('My','WebHosting')]
+    [string]$CertificateStoreName = 'My',
 
     [Parameter(ParameterSetName = 'Deploy')]
     [string]$BackupPath = '.',
@@ -554,13 +570,14 @@ try {
     Add-Type -Path $dll -ErrorAction Stop
 
     # ---------------- 1. importar o PFX (so quando for efetivar) ----------------
-    $lojaMy = New-Object System.Security.Cryptography.X509Certificates.X509Store('My','LocalMachine')
-    $lojaMy.Open('ReadOnly')
-    $jaExiste = @($lojaMy.Certificates | Where-Object { $_.Thumbprint -ieq $Ctx.NewThumbprint }).Count -gt 0
-    $lojaMy.Close()
+    $nomeLoja = if ($Ctx.StoreName) { $Ctx.StoreName } else { 'My' }
+    $lojaDestino = New-Object System.Security.Cryptography.X509Certificates.X509Store($nomeLoja,'LocalMachine')
+    $lojaDestino.Open('ReadOnly')
+    $jaExiste = @($lojaDestino.Certificates | Where-Object { $_.Thumbprint -ieq $Ctx.NewThumbprint }).Count -gt 0
+    $lojaDestino.Close()
 
     if ($jaExiste) {
-        $resultado.CertImportado = 'ja estava instalado'
+        $resultado.CertImportado = ('ja estava instalado em LocalMachine\{0}' -f $nomeLoja)
     } elseif ($Ctx.Apply) {
         $flags = [System.Security.Cryptography.X509Certificates.X509KeyStorageFlags]::MachineKeySet -bor `
                  [System.Security.Cryptography.X509Certificates.X509KeyStorageFlags]::PersistKeySet
@@ -591,9 +608,9 @@ try {
             throw ('thumbprint divergente: a estacao calculou {0} e o servidor leu {1}' -f $Ctx.NewThumbprint, $folha.Thumbprint)
         }
 
-        $st = New-Object System.Security.Cryptography.X509Certificates.X509Store('My','LocalMachine')
+        $st = New-Object System.Security.Cryptography.X509Certificates.X509Store($nomeLoja,'LocalMachine')
         $st.Open('ReadWrite'); $st.Add($folha); $st.Close()
-        $resultado.CertImportado = 'importado'
+        $resultado.CertImportado = ('importado em LocalMachine\{0}' -f $nomeLoja)
 
         foreach ($c in $colecao) {
             if ($c.Thumbprint -ieq $folha.Thumbprint) { continue }
@@ -1141,6 +1158,8 @@ function Invoke-CertDeploy {
     Write-Host ('  Nomes      : ' + ($nomes -join ', '))
     Write-Host ('  Valido ate : {0}  ({1} dia(s))' -f $cert.NotAfter.ToString('yyyy-MM-dd HH:mm:ss'), $dias)
     Write-Host ('  Thumbprint : ' + $thumb)
+    Write-Host ('  Loja destino: LocalMachine\{0}{1}' -f $Cfg.CertificateStoreName,
+                $(if ($Cfg.CertificateStoreName -eq 'My') { '  ("Pessoal" no certlm.msc)' } else { '  ("Hospedagem na Web" no certlm.msc)' }))
     Write-Host ''
 
     if ($dias -lt 0)  { throw ('O certificado ja expirou em {0}. Abortando.' -f $cert.NotAfter.ToString('yyyy-MM-dd')) }
@@ -1154,7 +1173,7 @@ function Invoke-CertDeploy {
     $ctx = @{
         NewThumbprint        = $thumb
         CertNames            = $nomes
-        StoreName            = 'My'
+        StoreName            = $(if ($Cfg.CertificateStoreName) { $Cfg.CertificateStoreName } else { 'My' })
         SiteName             = $Cfg.SiteName
         HostNameFilter       = $Cfg.HostNameFilter
         ReplaceThumbprint    = $Cfg.ReplaceThumbprint
@@ -1297,6 +1316,7 @@ if ($MyInvocation.InvocationName -ne '.') {
         SiteName = $SiteName; HostNameFilter = $HostNameFilter
         ReplaceThumbprint = $ReplaceThumbprint; IncludeEmptyHostName = $IncludeEmptyHostName
         Apply = $Apply; Exportable = $Exportable; BackupPath = $BackupPath
+        CertificateStoreName = $CertificateStoreName
         Rollback = $Rollback; ThrottleLimit = $ThrottleLimit; LogFile = $LogFile
     }
 

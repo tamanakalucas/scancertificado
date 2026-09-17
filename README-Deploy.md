@@ -100,9 +100,24 @@ O construtor de `X509Certificate2`, usado na leitura local, **tem** essa sobreca
 sintoma só aparece na importação remota, depois de a fase local ter exibido o certificado
 corretamente. O script converte em memória via BSTR e zera o buffer em seguida.
 
+## Onde o certificado é instalado
+
+| Parte do PFX | Loja | Nome no `certlm.msc` |
+|---|---|---|
+| Folha (com chave privada) | `LocalMachine\My` (padrão) | **Pessoal** |
+| Folha, com `-CertificateStoreName WebHosting` | `LocalMachine\WebHosting` | **Hospedagem na Web** |
+| Intermediárias | `LocalMachine\CA` | **Autoridades de Certificação Intermediárias** |
+| Raiz | *não instalada* | — |
+
+**O import só acontece com `-Apply`.** Em ensaio o script não grava nada no servidor: se você
+procurar o certificado no `certlm` depois de um ensaio, ele não estará lá — e está correto.
+
+Use `-CertificateStoreName WebHosting` se essa for a convenção do seu parque. Deixar `My` fixo
+moveria de loja, em silêncio, o binding de quem usa `WebHosting`.
+
 ## Cadeia e chave privada
 
-O PFX costuma trazer a cadeia. O script instala a folha em `LocalMachine\My` e as
+O PFX costuma trazer a cadeia. O script instala a folha na loja escolhida e as
 **intermediárias em `LocalMachine\CA`** — sem isso o servidor serve cadeia incompleta e o
 cliente reclama, que é o mesmo problema que o `Get-CertInventory` reporta como
 `CadeiaCompleta: INCOMPLETA`.

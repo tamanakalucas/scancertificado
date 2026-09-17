@@ -447,3 +447,20 @@ Describe 'Bloco remoto: uso da senha' {
         $txt | Should -Match 'ConvertFrom-SecureStringPlain'
     }
 }
+
+Describe 'Loja de destino do certificado' {
+    It 'o bloco remoto usa a loja escolhida, e nao um valor fixo' {
+        $txt = (New-RemoteScriptBlock).ToString()
+        # A folha tem de ir para a loja indicada em -CertificateStoreName; deixar 'My' fixo
+        # moveria de loja, em silencio, o binding de quem usa WebHosting.
+        $txt | Should -Match '\$nomeLoja'
+        $txt | Should -Not -Match "X509Store\('My','LocalMachine'\)"
+    }
+    It 'as intermediarias vao sempre para CA, independentemente da loja da folha' {
+        (New-RemoteScriptBlock).ToString() | Should -Match "X509Store\('CA','LocalMachine'\)"
+    }
+    It 'o import so ocorre com -Apply' {
+        # Em ensaio nada pode ser gravado no servidor.
+        (New-RemoteScriptBlock).ToString() | Should -Match 'elseif \(\$Ctx\.Apply\)'
+    }
+}
