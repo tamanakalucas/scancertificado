@@ -486,6 +486,33 @@ function Read-NetshSslCert {
     return ,$saida
 }
 
+function ConvertFrom-SecureStringPlain {
+    <#
+    .SYNOPSIS
+        Converte um SecureString para texto em memoria, liberando o buffer em seguida.
+    .DESCRIPTION
+        X509Certificate2Collection.Import NAO tem sobrecarga para SecureString -- so para
+        string. Passando o SecureString direto, o PowerShell o converte por ToString() e a
+        senha vira a literal "System.Security.SecureString", o que o Windows reporta como
+        "The specified network password is not correct". Como a API de criptografia exige
+        string, a conversao e inevitavel; o que da para garantir e que ela viva o minimo
+        possivel e que o buffer nao autogerenciado seja zerado.
+
+        Repare que X509Certificate2 (o construtor) TEM a sobrecarga com SecureString, o que
+        faz a leitura local funcionar e mascara o problema ate a hora do import remoto.
+    #>
+    [CmdletBinding()]
+    param([System.Security.SecureString]$Secure)
+
+    if ($null -eq $Secure) { return $null }
+    $bstr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($Secure)
+    try {
+        return [System.Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr)
+    } finally {
+        [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
+    }
+}
+
 function Get-ThumbprintFromBytes {
     [CmdletBinding()]
     param([byte[]]$Bytes)
@@ -500,6 +527,7 @@ function Get-ThumbprintFromBytes {
 $script:FuncoesRemotas = @(
     'Test-HostNameMatchesCertificate','ConvertFrom-SslFlags','Select-BindingAction',
     'Get-SharedBindingWarning','Read-NetshSslCert','Get-ThumbprintFromBytes',
+    'ConvertFrom-SecureStringPlain',
     'Get-CertificateSubjectNames'
 )
 
@@ -543,7 +571,18 @@ try {
         # A colecao traz a cadeia inteira do PFX. A folha vai para My; os intermediarios vao
         # para CA, senao o servidor serve cadeia incompleta e o cliente reclama.
         $colecao = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2Collection
-        $colecao.Import($Ctx.PfxBytes, $Senha, $flags)
+        $senhaTexto = ConvertFrom-SecureStringPlain -Secure $Senha
+        try {
+            $colecao.Import($Ctx.PfxBytes, $senhaTexto, $flags)
+        } catch {
+            $m = $_.Exception.GetBaseException().Message
+            if ($m -match 'password|senha') {
+                throw ('nao foi possivel abrir o PFX no servidor: ' + $m + ' -- a estacao abriu o mesmo arquivo com esta senha, entao suspeite dos bytes em transito, nao da senha')
+            }
+            throw $m
+        } finally {
+            $senhaTexto = $null
+        }
 
         $folha = $null
         foreach ($c in $colecao) { if ($c.HasPrivateKey) { $folha = $c; break } }

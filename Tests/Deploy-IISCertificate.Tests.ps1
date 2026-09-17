@@ -401,3 +401,49 @@ Describe 'Test-RemotingReachability' {
         { Test-RemotingReachability -Computer 'host.que.nao.existe.invalido' -TimeoutMs 500 } | Should -Not -Throw
     }
 }
+
+Describe 'ConvertFrom-SecureStringPlain' {
+    It 'devolve o texto original' {
+        $sec = ConvertTo-SecureString 'SenhaDeTeste123' -AsPlainText -Force
+        ConvertFrom-SecureStringPlain -Secure $sec | Should -BeExactly 'SenhaDeTeste123'
+    }
+    It 'preserva acentos e simbolos' {
+        $sec = ConvertTo-SecureString 'Senh@ com ACENTO e #$%' -AsPlainText -Force
+        ConvertFrom-SecureStringPlain -Secure $sec | Should -BeExactly 'Senh@ com ACENTO e #$%'
+    }
+    It 'devolve nulo para entrada nula, sem lancar excecao' {
+        ConvertFrom-SecureStringPlain -Secure $null | Should -BeNullOrEmpty
+    }
+    It 'nunca devolve a literal do tipo, que era o bug' {
+        # Passar o SecureString direto para uma API sem essa sobrecarga faz o PowerShell
+        # converter por ToString(), e a senha vira "System.Security.SecureString".
+        $sec = ConvertTo-SecureString 'abc' -AsPlainText -Force
+        ConvertFrom-SecureStringPlain -Secure $sec | Should -Not -Be 'System.Security.SecureString'
+        [string]$sec | Should -Be 'System.Security.SecureString'   # comportamento que causou o bug
+    }
+    It 'abre de fato um PFX, que e o uso real' {
+        $rsa = [System.Security.Cryptography.RSA]::Create(2048)
+        $req = New-Object System.Security.Cryptography.X509Certificates.CertificateRequest(
+            'CN=pfx.teste', $rsa,
+            [System.Security.Cryptography.HashAlgorithmName]::SHA256,
+            [System.Security.Cryptography.RSASignaturePadding]::Pkcs1)
+        $cert = $req.CreateSelfSigned([DateTimeOffset]::UtcNow.AddDays(-1), [DateTimeOffset]::UtcNow.AddDays(30))
+        $sec  = ConvertTo-SecureString 'p@ss123' -AsPlainText -Force
+        $pfx  = $cert.Export([System.Security.Cryptography.X509Certificates.X509ContentType]::Pfx, 'p@ss123')
+
+        $col = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2Collection
+        { $col.Import($pfx, (ConvertFrom-SecureStringPlain -Secure $sec),
+            [System.Security.Cryptography.X509Certificates.X509KeyStorageFlags]::DefaultKeySet) } | Should -Not -Throw
+        $col.Count | Should -BeGreaterThan 0
+    }
+}
+
+Describe 'Bloco remoto: uso da senha' {
+    It 'nao entrega o SecureString direto ao Import, que nao tem essa sobrecarga' {
+        $txt = (New-RemoteScriptBlock).ToString()
+        # -cmatch/-match no PowerShell ignora caixa, entao delimitar o fim da variavel:
+        # sem isso, '$senhaTexto' (a correcao) casaria com '$Senha' e o teste falharia sozinho.
+        $txt | Should -Not -Match '\.Import\(\$Ctx\.PfxBytes,\s*\$Senha\s*[,)]'
+        $txt | Should -Match 'ConvertFrom-SecureStringPlain'
+    }
+}

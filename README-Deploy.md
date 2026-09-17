@@ -89,6 +89,17 @@ parâmetros e gravaria a linha inteira em texto puro no `ConsoleHost_history.txt
 A senha trafega como `SecureString` pela sessão do PSRemoting, criptografada por Kerberos ou
 HTTPS. **Não use autenticação Basic sobre HTTP**, onde ela iria em claro.
 
+### Uma armadilha do PowerShell que vale conhecer
+
+`X509Certificate2Collection.Import` **não tem sobrecarga para `SecureString`** — só para
+`string`. Entregando o `SecureString` direto, o PowerShell o converte por `ToString()` e a senha
+vira a literal `System.Security.SecureString`, que o Windows reporta como
+*"The specified network password is not correct"* — indistinguível de senha errada de verdade.
+
+O construtor de `X509Certificate2`, usado na leitura local, **tem** essa sobrecarga. Por isso o
+sintoma só aparece na importação remota, depois de a fase local ter exibido o certificado
+corretamente. O script converte em memória via BSTR e zera o buffer em seguida.
+
 ## Cadeia e chave privada
 
 O PFX costuma trazer a cadeia. O script instala a folha em `LocalMachine\My` e as
